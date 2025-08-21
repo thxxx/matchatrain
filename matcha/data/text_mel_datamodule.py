@@ -12,7 +12,7 @@ from matcha.text import text_to_sequence
 from matcha.utils.audio import mel_spectrogram
 from matcha.utils.model import fix_len_compatibility, normalize
 from matcha.utils.utils import intersperse
-
+import pandas as pd
 
 def parse_filelist(filelist_path, split_char="|"):
     with open(filelist_path, encoding="utf-8") as f:
@@ -141,7 +141,9 @@ class TextMelDataset(torch.utils.data.Dataset):
         seed=None,
         load_durations=False,
     ):
-        self.filepaths_and_text = parse_filelist(filelist_path)
+        df = pd.read_csv(filelist_path, sep="|", header=None)
+        self.filepaths_and_text = [[df.iloc[i][0], df.iloc[i][1]] for i in range(len(df))]
+        # self.filepaths_and_text = parse_filelist(filelist_path)
         self.n_spks = n_spks
         self.cleaners = cleaners
         self.add_blank = add_blank
@@ -160,24 +162,6 @@ class TextMelDataset(torch.utils.data.Dataset):
             self.data_parameters = {"mel_mean": 0, "mel_std": 1}
         random.seed(seed)
         random.shuffle(self.filepaths_and_text)
-
-    def get_datapoint(self, filepath_and_text):
-        if self.n_spks > 1:
-            filepath, spk, text = (
-                filepath_and_text[0],
-                int(filepath_and_text[1]),
-                filepath_and_text[2],
-            )
-        else:
-            filepath, text = filepath_and_text[0], filepath_and_text[1]
-            spk = None
-
-        text, cleaned_text = self.get_text(text, add_blank=self.add_blank)
-        mel = self.get_mel(filepath)
-
-        durations = self.get_durations(filepath, text) if self.load_durations else None
-
-        return {"x": text, "y": mel, "spk": spk, "filepath": filepath, "x_text": cleaned_text, "durations": durations}
 
     def get_durations(self, filepath, text):
         filepath = Path(filepath)
@@ -219,6 +203,24 @@ class TextMelDataset(torch.utils.data.Dataset):
             text_norm = intersperse(text_norm, 0)
         text_norm = torch.IntTensor(text_norm)
         return text_norm, cleaned_text
+
+    def get_datapoint(self, filepath_and_text):
+        if self.n_spks > 1:
+            filepath, spk, text = (
+                filepath_and_text[0],
+                int(filepath_and_text[1]),
+                filepath_and_text[2],
+            )
+        else:
+            filepath, text = '/workspace/matchatrain/LJSpeech-1.1/wavs/' + filepath_and_text[0] + '.wav', filepath_and_text[1]
+            spk = None
+
+        text, cleaned_text = self.get_text(text, add_blank=self.add_blank)
+        mel = self.get_mel(filepath)
+
+        durations = self.get_durations(filepath, text) if self.load_durations else None
+
+        return {"x": text, "y": mel, "spk": spk, "filepath": filepath, "x_text": cleaned_text, "durations": durations}
 
     def __getitem__(self, index):
         datapoint = self.get_datapoint(self.filepaths_and_text[index])

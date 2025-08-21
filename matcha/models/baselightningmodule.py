@@ -13,6 +13,11 @@ from lightning.pytorch.utilities import grad_norm
 from matcha import utils
 from matcha.utils.utils import plot_tensor
 
+from matcha.hifigan.config import v1
+from matcha.hifigan.denoiser import Denoiser
+from matcha.hifigan.env import AttrDict
+from matcha.hifigan.models import Generator as HiFiGAN
+
 log = utils.get_pylogger(__name__)
 
 
@@ -58,6 +63,7 @@ class BaseLightningClass(LightningModule, ABC):
         y, y_lengths = batch["y"], batch["y_lengths"]
         spks = batch["spks"]
 
+        # 여기가 진짜 infrence 코드인데 모델 코드 자체에서 forward에 loss도 계산한다?
         dur_loss, prior_loss, diff_loss, *_ = self(
             x=x,
             x_lengths=x_lengths,
@@ -67,6 +73,7 @@ class BaseLightningClass(LightningModule, ABC):
             out_size=self.out_size,
             durations=batch["durations"],
         )
+        
         return {
             "dur_loss": dur_loss,
             "prior_loss": prior_loss,
@@ -127,6 +134,7 @@ class BaseLightningClass(LightningModule, ABC):
 
     def validation_step(self, batch: Any, batch_idx: int):
         loss_dict = self.get_losses(batch)
+        
         self.log(
             "sub_loss/val_dur_loss",
             loss_dict["dur_loss"],
@@ -165,7 +173,36 @@ class BaseLightningClass(LightningModule, ABC):
 
         return total_loss
 
+    def get_metric(self):
+        """
+        임의로 1000개 정도 생성한 뒤 wer, cer 체크
+        """
+        
+
     def on_validation_end(self) -> None:
+        """
+        validation이 다 끝난 뒤 한번 호출된다. = 현재는 1에포크당 1번
+        """
+        if self.current_epoch % 10 == 9:
+            self.get_metric()
+        
+        def load_vocoder(checkpoint_path):
+            h = AttrDict(v1)
+            hifigan = HiFiGAN(h).to(self.device)
+            hifigan.load_state_dict(torch.load(checkpoint_path, map_location=self.device)['generator'])
+            _ = hifigan.eval()
+            hifigan.remove_weight_norm()
+            return hifigan
+        
+        vocoder = load_vocoder('/workspace/generator_v1')
+        denoiser = Denoiser(vocoder, mode='zeros')
+        
+        @torch.inference_mode()
+        def to_waveform(mel, vocoder):
+            audio = vocoder(mel).clamp(-1, 1)
+            audio = denoiser(audio.squeeze(0), strength=0.00025).cpu().squeeze()
+            return audio.cpu().squeeze()
+
         if self.trainer.is_global_zero:
             one_batch = next(iter(self.trainer.val_dataloaders))
             if self.current_epoch == 0:
@@ -180,13 +217,21 @@ class BaseLightningClass(LightningModule, ABC):
                     )
 
             log.debug("Synthesising...")
+            
             for i in range(2):
                 x = one_batch["x"][i].unsqueeze(0).to(self.device)
                 x_lengths = one_batch["x_lengths"][i].unsqueeze(0).to(self.device)
+                
                 spks = one_batch["spks"][i].unsqueeze(0).to(self.device) if one_batch["spks"] is not None else None
+                
                 output = self.synthesise(x[:, :x_lengths], x_lengths, n_timesteps=10, spks=spks)
+                
                 y_enc, y_dec = output["encoder_outputs"], output["decoder_outputs"]
+
+                waveform = to_waveform(output['mel'], vocoder)
+                
                 attn = output["attn"]
+                
                 self.logger.experiment.add_image(
                     f"generated_enc/{i}",
                     plot_tensor(y_enc.squeeze().cpu()),
@@ -205,6 +250,22 @@ class BaseLightningClass(LightningModule, ABC):
                     self.current_epoch,
                     dataformats="HWC",
                 )
+                if waveform is not None:
+                    if waveform.dim() == 2:        # (B, T) -> (1, T)
+                        waveform = waveform[:1]
+                    if waveform.dim() == 3:        # (B, C, T) -> mono만
+                        waveform = waveform[:1, :1, :]  # (1, 1, T)
+    
+                    # TensorBoard에 오디오 로깅
+                    self.logger.experiment.add_audio(
+                        f"audio/{i}",
+                        waveform.squeeze().detach().cpu(),  # (C, T) 혹은 (T,)
+                        global_step=self.current_epoch,
+                        sample_rate=22050,
+                    )
+        del vocoder
+        del denoiser
+        torch.cuda.empty_cache()
 
     def on_before_optimizer_step(self, optimizer):
         self.log_dict({f"grad_norm/{k}": v for k, v in grad_norm(self, norm_type=2).items()})

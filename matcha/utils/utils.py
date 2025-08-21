@@ -135,11 +135,19 @@ def intersperse(lst, item):
     return result
 
 
+# def save_figure_to_numpy(fig):
+#     buf = fig.canvas.buffer_rgba()
+#     data = np.asarray(buf, dtype=np.uint8)
+#     # data = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep="")
+#     data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+#     return data
 def save_figure_to_numpy(fig):
-    data = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep="")
-    data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-    return data
-
+    fig.canvas.draw()  # 렌더러 준비
+    w, h = fig.canvas.get_width_height()
+    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+    rgba = buf.reshape(h, w, 4)     # 4채널
+    rgb = rgba[:, :, :3].copy()     # 알파 채널 제거, C-contiguous 보장
+    return rgb
 
 def plot_tensor(tensor):
     plt.style.use("default")

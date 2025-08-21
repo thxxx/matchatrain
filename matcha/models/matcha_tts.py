@@ -116,11 +116,7 @@ class MatchaTTS(BaseLightningClass):  # 🍵
             spks = self.spk_emb(spks.long())
 
         # Get encoder_outputs `mu_x` and log-scaled token durations `logw`
-        print(x, x_lengths, spks)
         mu_x, logw, x_mask = self.encoder(x, x_lengths, spks)
-        print("mu_x : ", mu_x.shape) # phoneme embedding
-        print("logw : ", logw.shape) # This is phoneme별 duration prediction
-        print("x_mask : ", x_mask.shape)
 
         w = torch.exp(logw) * x_mask
         w_ceil = torch.ceil(w) * length_scale # 최소 1프레임은 가져가도록 올림 처리, length_scale은 말하기 속도
@@ -141,7 +137,6 @@ class MatchaTTS(BaseLightningClass):  # 🍵
         encoder_outputs = mu_y[:, :, :y_max_length]
 
         # Generate sample tracing the probability flow
-        print("mu_y : ", mu_y.shape)
         decoder_outputs = self.decoder(mu_y, y_mask, n_timesteps, temperature, spks)
         decoder_outputs = decoder_outputs[:, :, :y_max_length]
 
@@ -159,6 +154,8 @@ class MatchaTTS(BaseLightningClass):  # 🍵
 
     def forward(self, x, x_lengths, y, y_lengths, spks=None, out_size=None, cond=None, durations=None):
         """
+        모델의 forward에서 loss도 계산한다.
+        
         Computes 3 losses:
             1. duration loss: loss between predicted token durations and those extracted by Monotonic Alignment Search (MAS).
             2. prior loss: loss between mel-spectrogram and encoder outputs.
@@ -174,7 +171,7 @@ class MatchaTTS(BaseLightningClass):  # 🍵
             y_lengths (torch.Tensor): lengths of mel-spectrograms in batch.
                 shape: (batch_size,)
             out_size (int, optional): length (in mel's sampling rate) of segment to cut, on which decoder will be trained.
-                Should be divisible by 2^{num of UNet downsamplings}. Needed to increase batch size.
+          mask  Should be divisible by 2^{num of UNet downsamplings}. Needed to increase batch size.
             spks (torch.Tensor, optional): speaker ids.
                 shape: (batch_size,)
         """

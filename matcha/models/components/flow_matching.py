@@ -85,7 +85,10 @@ class BASECFM(torch.nn.Module, ABC):
         return sol[-1]
 
     def compute_loss(self, x1, mask, mu, spks=None, cond=None):
-        """Computes diffusion loss
+        """
+        여기서 train step의 flow matching loss 계산!
+        
+        Computes diffusion loss
 
         Args:
             x1 (torch.Tensor): Target
@@ -104,17 +107,22 @@ class BASECFM(torch.nn.Module, ABC):
         """
         b, _, t = mu.shape
 
-        # random timestep
+        # random timestep, 0~1 사이 uniform sampling
         t = torch.rand([b, 1, 1], device=mu.device, dtype=mu.dtype)
         # sample noise p(x_0)
         z = torch.randn_like(x1)
 
+        # x_t, linear interpolation으로 계산
         y = (1 - (1 - self.sigma_min) * t) * z + t * x1
-        u = x1 - (1 - self.sigma_min) * z
+        
+        # target vector field
+        target_vf = x1 - (1 - self.sigma_min) * z
 
-        loss = F.mse_loss(self.estimator(y, mask, mu, t.squeeze(), spks), u, reduction="sum") / (
-            torch.sum(mask) * u.shape[1]
-        )
+        # estimator is decoder
+        predicted_flow = self.estimator(y, mask, mu, t.squeeze(), spks)
+
+        loss = F.mse_loss(predicted_flow, target_vf, reduction="sum") / (torch.sum(mask) * predicted_flow.shape[1])
+        
         return loss, y
 
 

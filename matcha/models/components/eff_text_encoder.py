@@ -398,7 +398,8 @@ class MultiHeadAttention(nn.Module):
         # 필요 시 마지막 attn 저장(디버깅/로깅)
         self.attn = p_attn  # (B,H,Tq,Tk) or None
 
-        return out, p_attn  # p_attn=None일 수 있음
+        return out
+        # return out, p_attn  # p_attn=None일 수 있음
 
 class FFN(nn.Module):
     def __init__(self, in_channels, out_channels, filter_channels, kernel_size, p_dropout=0.0):
