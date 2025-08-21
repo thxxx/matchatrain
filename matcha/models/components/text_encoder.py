@@ -68,6 +68,9 @@ class ConvReluNorm(nn.Module):
 
 
 class DurationPredictor(nn.Module):
+    """
+    phoneme 임베딩을 받아서 convolution을 통해 dim이 1인, scalar 값 예측
+    """
     def __init__(self, in_channels, filter_channels, kernel_size, p_dropout):
         super().__init__()
         self.in_channels = in_channels
@@ -251,7 +254,6 @@ class MultiHeadAttention(nn.Module):
         diff = torch.unsqueeze(r, 0) - torch.unsqueeze(r, 1)
         return torch.unsqueeze(torch.unsqueeze(-torch.log1p(torch.abs(diff)), 0), 0)
 
-
 class FFN(nn.Module):
     def __init__(self, in_channels, out_channels, filter_channels, kernel_size, p_dropout=0.0):
         super().__init__()
@@ -274,6 +276,10 @@ class FFN(nn.Module):
 
 
 class Encoder(nn.Module):
+    """
+    SelfAttention + norm -> FeedForward + norm
+    Feedforward is convoluion. Transformer 보다는 Unet
+    """
     def __init__(
         self,
         hidden_channels,
@@ -297,6 +303,7 @@ class Encoder(nn.Module):
         self.norm_layers_1 = torch.nn.ModuleList()
         self.ffn_layers = torch.nn.ModuleList()
         self.norm_layers_2 = torch.nn.ModuleList()
+        
         for _ in range(self.n_layers):
             self.attn_layers.append(MultiHeadAttention(hidden_channels, hidden_channels, n_heads, p_dropout=p_dropout))
             self.norm_layers_1.append(LayerNorm(hidden_channels))
@@ -367,6 +374,7 @@ class TextEncoder(nn.Module):
             encoder_params.p_dropout,
         )
 
+        # 최종 인코더 출력을 1×1 Conv로 n_feats 차원으로 사영.
         self.proj_m = torch.nn.Conv1d(self.n_channels + (spk_emb_dim if n_spks > 1 else 0), self.n_feats, 1)
         self.proj_w = DurationPredictor(
             self.n_channels + (spk_emb_dim if n_spks > 1 else 0),

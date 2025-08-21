@@ -8,7 +8,7 @@ import matcha.utils.monotonic_align as monotonic_align  # pylint: disable=consid
 from matcha import utils
 from matcha.models.baselightningmodule import BaseLightningClass
 from matcha.models.components.flow_matching import CFM
-from matcha.models.components.text_encoder import TextEncoder
+from matcha.models.components.eff_text_encoder import TextEncoder
 from matcha.utils.model import (
     denormalize,
     duration_loss,
@@ -116,25 +116,32 @@ class MatchaTTS(BaseLightningClass):  # 🍵
             spks = self.spk_emb(spks.long())
 
         # Get encoder_outputs `mu_x` and log-scaled token durations `logw`
+        print(x, x_lengths, spks)
         mu_x, logw, x_mask = self.encoder(x, x_lengths, spks)
+        print("mu_x : ", mu_x.shape) # phoneme embedding
+        print("logw : ", logw.shape) # This is phoneme별 duration prediction
+        print("x_mask : ", x_mask.shape)
 
         w = torch.exp(logw) * x_mask
-        w_ceil = torch.ceil(w) * length_scale
+        w_ceil = torch.ceil(w) * length_scale # 최소 1프레임은 가져가도록 올림 처리, length_scale은 말하기 속도
         y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
         y_max_length = y_lengths.max()
-        y_max_length_ = fix_len_compatibility(y_max_length)
+        y_max_length_ = fix_len_compatibility(y_max_length) # Batch Inference GPU 병렬 연산을 위해 길이를 특정 배수로 맞추는 함수
 
-        # Using obtained durations `w` construct alignment map `attn`
         y_mask = sequence_mask(y_lengths, y_max_length_).unsqueeze(1).to(x_mask.dtype)
         attn_mask = x_mask.unsqueeze(-1) * y_mask.unsqueeze(2)
-        attn = generate_path(w_ceil.squeeze(1), attn_mask.squeeze(1)).unsqueeze(1)
+        attn = generate_path(w_ceil.squeeze(1), attn_mask.squeeze(1)).unsqueeze(1) # duration에 맞게 monotonic alignment map을 만든다.
+        # [1,1,0,0,0,0]   # 첫 번째 phoneme → frame 2칸
+        # [0,0,1,1,1,0]   # 두 번째 phoneme → frame 3칸
+        # [0,0,0,0,0,1]   # 세 번째 phoneme → frame 1칸
 
-        # Align encoded text and get mu_y
+        # mu_x를 프레임별 길이에 맞게 늘려준다.
         mu_y = torch.matmul(attn.squeeze(1).transpose(1, 2), mu_x.transpose(1, 2))
         mu_y = mu_y.transpose(1, 2)
         encoder_outputs = mu_y[:, :, :y_max_length]
 
         # Generate sample tracing the probability flow
+        print("mu_y : ", mu_y.shape)
         decoder_outputs = self.decoder(mu_y, y_mask, n_timesteps, temperature, spks)
         decoder_outputs = decoder_outputs[:, :, :y_max_length]
 
