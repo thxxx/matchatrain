@@ -142,7 +142,7 @@ class TextMelDataset(torch.utils.data.Dataset):
         load_durations=False,
     ):
         df = pd.read_csv(filelist_path, sep="|", header=None)
-        self.filepaths_and_text = [[df.iloc[i][0], df.iloc[i][1]] for i in range(len(df))]
+        self.filepaths_and_text =. [[df.iloc[i][0], df.iloc[i][1]] for i in range(len(df))]
         # self.filepaths_and_text = parse_filelist(filelist_path)
         self.n_spks = n_spks
         self.cleaners = cleaners

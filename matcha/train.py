@@ -46,12 +46,13 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if cfg.get("seed"):
         L.seed_everything(cfg.seed, workers=True)
 
+    print(cfg.data, "\n\n")
+    print(cfg.model, "\n\n")
     cfg.data.train_filelist_path = '/workspace/matchatrain/LJSpeech-1.1/train.csv'
     cfg.data.valid_filelist_path = '/workspace/matchatrain/LJSpeech-1.1/test.csv'
+    
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.data)
-
     model: LightningModule = hydra.utils.instantiate(cfg.model)
-
     callbacks: List[Callback] = utils.instantiate_callbacks(cfg.get("callbacks"))
 
     log.info("Instantiating loggers...")
