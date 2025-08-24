@@ -142,7 +142,7 @@ class TextMelDataset(torch.utils.data.Dataset):
         load_durations=False,
     ):
         df = pd.read_csv(filelist_path, sep="|", header=None)
-        self.filepaths_and_text =. [[df.iloc[i][0], df.iloc[i][1]] for i in range(len(df))]
+        self.filepaths_and_text = [[df.iloc[i][0], df.iloc[i][1]] for i in range(len(df))]
         # self.filepaths_and_text = parse_filelist(filelist_path)
         self.n_spks = n_spks
         self.cleaners = cleaners
@@ -236,9 +236,9 @@ class TextMelBatchCollate:
 
     def __call__(self, batch):
         B = len(batch)
-        y_max_length = max([item["y"].shape[-1] for item in batch])  # pylint: disable=consider-using-generator
-        y_max_length = fix_len_compatibility(y_max_length)
-        x_max_length = max([item["x"].shape[-1] for item in batch])  # pylint: disable=consider-using-generator
+        y_max_length = max([item["y"].shape[-1] for item in batch]) 
+        y_max_length = fix_len_compatibility(y_max_length) # 모델이 요구하는 길이 배수로 맞춤
+        x_max_length = max([item["x"].shape[-1] for item in batch]) 
         n_feats = batch[0]["y"].shape[-2]
 
         y = torch.zeros((B, n_feats, y_max_length), dtype=torch.float32)
@@ -252,8 +252,8 @@ class TextMelBatchCollate:
             y_, x_ = item["y"], item["x"]
             y_lengths.append(y_.shape[-1])
             x_lengths.append(x_.shape[-1])
-            y[i, :, : y_.shape[-1]] = y_
-            x[i, : x_.shape[-1]] = x_
+            y[i, :, : y_.shape[-1]] = y_ # 제로 텐서에 앞부분은 기존 y로 덮어씌움
+            x[i, : x_.shape[-1]] = x_ # 제로 텐서에 앞부분은 기존 x로 덮어씌움
             spks.append(item["spk"])
             filepaths.append(item["filepath"])
             x_texts.append(item["x_text"])

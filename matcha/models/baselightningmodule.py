@@ -12,11 +12,14 @@ from lightning.pytorch.utilities import grad_norm
 
 from matcha import utils
 from matcha.utils.utils import plot_tensor
+from matcha.utils.metric import wer_en, cer_en
 
 from matcha.hifigan.config import v1
 from matcha.hifigan.denoiser import Denoiser
 from matcha.hifigan.env import AttrDict
 from matcha.hifigan.models import Generator as HiFiGAN
+
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
 log = utils.get_pylogger(__name__)
 
@@ -173,18 +176,66 @@ class BaseLightningClass(LightningModule, ABC):
 
         return total_loss
 
-    def get_metric(self):
+    def get_metric(self, vocoder, denoiser):
         """
         임의로 1000개 정도 생성한 뒤 wer, cer 체크
         """
-        
+        import pandas as pd
+        import torchaudio
+
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
+        model_id = "openai/whisper-large-v3-turbo"
+
+        wmodel = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True, use_safetensors=True
+        )
+        wmodel.to(device)
+        processor = AutoProcessor.from_pretrained(model_id)
+
+        pipe = pipeline(
+            "automatic-speech-recognition",
+            model=wmodel,
+            tokenizer=processor.tokenizer,
+            feature_extractor=processor.feature_extractor,
+            torch_dtype=torch_dtype,
+            device=device,
+        )
+
+        @torch.inference_mode()
+        def to_waveform(mel, vocoder):
+            audio = vocoder(mel).clamp(-1, 1)
+            audio = denoiser(audio.squeeze(0), strength=0.00025).cpu().squeeze()
+            return audio.cpu().squeeze()
+
+        eval_df = pd.read_csv("/workspace/matchatrain/LJSpeech-1.1/test.csv", sep="|", header=None)
+        texts =  [eval_df.iloc[i][1] for i in range(len(eval_df))]
+        resampler = torchaudio.transforms.Resample(orig_freq=16000, new_freq=22050)
+
+        wer_list, cer_list = [], []
+
+        for text in texts:
+            output = self.synthesise(text, n_timesteps=10, spks=None)
+            waveform = to_waveform(output['mel'], vocoder)
+            mono_22k = resampler(waveform)
+            script = pipe(mono_22k)
+
+            _w = wer_en(text, script['text'])
+            _c = cer_en(text, script['text'])
+            wer_list.append(_w)
+            cer_list.append(_c)
+
+        self.log("metric/WER", sum(wer_list)/len(wer_list), prog_bar=True, on_epoch=True, logger=True, sync_dist=True)
+        self.log("metric/CER", sum(cer_list)/len(cer_list), prog_bar=True, on_epoch=True, logger=True, sync_dist=True)
+
+        del wmodel, processor, pipe, resampler, eval_df, texts, wer_list, cer_list
+        torch.cuda.empty_cache()
 
     def on_validation_end(self) -> None:
         """
         validation이 다 끝난 뒤 한번 호출된다. = 현재는 1에포크당 1번
         """
-        if self.current_epoch % 10 == 9:
-            self.get_metric()
         
         def load_vocoder(checkpoint_path):
             h = AttrDict(v1)
@@ -263,6 +314,10 @@ class BaseLightningClass(LightningModule, ABC):
                         global_step=self.current_epoch,
                         sample_rate=22050,
                     )
+        
+        if self.current_epoch % 5 == 4:
+            self.get_metric(vocoder, denoiser)
+        
         del vocoder
         del denoiser
         torch.cuda.empty_cache()
