@@ -20,6 +20,7 @@ from matcha.hifigan.env import AttrDict
 from matcha.hifigan.models import Generator as HiFiGAN
 
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+from contextlib import contextmanager
 
 log = utils.get_pylogger(__name__)
 
@@ -82,9 +83,6 @@ class BaseLightningClass(LightningModule, ABC):
             "prior_loss": prior_loss,
             "diff_loss": diff_loss,
         }
-
-    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        self.ckpt_loaded_epoch = checkpoint["epoch"]  # pylint: disable=attribute-defined-outside-init
 
     def training_step(self, batch: Any, batch_idx: int):
         loss_dict = self.get_losses(batch)
@@ -281,6 +279,11 @@ class BaseLightningClass(LightningModule, ABC):
         del wmodel, processor, pipe, resampler, eval_df, texts, wer_list, cer_list
         torch.cuda.empty_cache()
 
+    def on_validation_epoch_start(self) -> None:
+        # 검증 전체를 EMA 가중치로 수행
+        self._ema_ctx = self._swap_to_ema_weights()
+        self._ema_ctx.__enter__()
+
     def on_validation_end(self) -> None:
         """
         validation이 다 끝난 뒤 한번 호출된다. = 현재는 1에포크당 1번
@@ -372,5 +375,138 @@ class BaseLightningClass(LightningModule, ABC):
         del denoiser
         torch.cuda.empty_cache()
 
+        if hasattr(self, "_ema_ctx"):
+            self._ema_ctx.__exit__(None, None, None)
+            del self._ema_ctx
+        
+        # ===== EMA utilities =====
+    def ema_enabled(self) -> bool:
+        # 필요시 하이퍼파라미터/Config로 제어 가능
+        return getattr(self, "use_ema", True)
+
+    def _ema_decay(self) -> float:
+        # 보편적으로 0.999~0.9999, diffusion은 0.999~0.9995 많이 씀
+        return float(getattr(self, "ema_decay", 0.999))
+
+    def _ema_every(self) -> int:
+        # 몇 스텝에 한 번 업데이트할지 (기본 1: 매 스텝)
+        return int(getattr(self, "ema_every_n_steps", 1))
+
+    def _ema_device(self):
+        # EMA를 CPU에 둘 수도 있음(메모리 절약). 기본은 모델과 동일 디바이스.
+        return getattr(self, "ema_device", None)  # None이면 param.device
+
+    def _should_init_ema(self) -> bool:
+        return not hasattr(self, "_ema_state_dict")
+
+    def _init_ema_state(self):
+        # 파라미터+버퍼를 통째로 복사 (버퍼는 decay 없이 그대로 보관)
+        self._ema_state_dict = {}
+        for k, v in self.state_dict().items():
+            if torch.is_tensor(v):
+                dev = self._ema_device() or v.device
+                self._ema_state_dict[k] = v.detach().clone().to(dev)
+            else:
+                self._ema_state_dict[k] = v
+
+    def _update_ema(self):
+        if not self.ema_enabled():
+            return
+        if self._should_init_ema():
+            self._init_ema_state()
+
+        if self.global_step % self._ema_every() != 0:
+            return
+
+        d = self._ema_decay()
+        with torch.no_grad():
+            curr = self.state_dict()
+            for k, v in curr.items():
+                if not torch.is_tensor(v):
+                    # non-tensor 그대로 유지
+                    self._ema_state_dict[k] = v
+                    continue
+                ema_v = self._ema_state_dict[k]
+                # 디바이스 맞추기 (EMA를 CPU에 두는 경우도 고려)
+                if ema_v.device != (self._ema_device() or v.device):
+                    ema_v = ema_v.to(self._ema_device() or v.device)
+                    self._ema_state_dict[k] = ema_v
+                # dtype mismatch 시 맞춤
+                if ema_v.dtype != v.dtype:
+                    ema_v = ema_v.to(dtype=v.dtype)
+                    self._ema_state_dict[k] = ema_v
+                # EMA 업데이트
+                ema_v.mul_(d).add_(v.detach(), alpha=(1.0 - d))
+
+    @contextmanager
+    def _swap_to_ema_weights(self):
+        """
+        with self._swap_to_ema_weights():  # EMA 가중치로 검증/샘플링
+            ...
+        블록이 끝나면 원래 가중치로 복원
+        """
+        if not self.ema_enabled():
+            yield
+            return
+        if self._should_init_ema():
+            # 아직 학습 초기 등으로 EMA가 없다면 현재 가중치로 초기화
+            self._init_ema_state()
+
+        # 백업 -> EMA 로드 -> 작업 -> 복원
+        backup = {k: v.detach().clone() if torch.is_tensor(v) else v
+                for k, v in self.state_dict().items()}
+
+        # EMA state를 현재 디바이스/dtype에 맞춰 로드
+        load_sd = {}
+        for k, v in self._ema_state_dict.items():
+            if torch.is_tensor(v):
+                dev = backup[k].device  # 현재 모델 텐서의 디바이스/dtype 기준
+                load_sd[k] = v.to(device=dev, dtype=backup[k].dtype)
+            else:
+                load_sd[k] = v
+        self.load_state_dict(load_sd, strict=True)
+        try:
+            yield
+        finally:
+            self.load_state_dict(backup, strict=True)
+
+    def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure, on_tpu=False, using_native_amp=False, using_lbfgs=False):
+        # 1) 원래 step 수행
+        optimizer.step(closure=optimizer_closure)
+
+        # 2) EMA 업데이트
+        if self.ema_enabled():
+            self._update_ema()
+
+        # 3) 스케줄러 등은 Lightning이 알아서 호출 (configure_optimizers 반환 방식에 따라 다름)
+
+    def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        if self.ema_enabled() and not self._should_init_ema():
+            # CPU로 저장하면 안전
+            ema_cpu = {}
+            for k, v in self._ema_state_dict.items():
+                if torch.is_tensor(v):
+                    ema_cpu[k] = v.detach().cpu()
+                else:
+                    ema_cpu[k] = v
+            checkpoint["ema_state_dict"] = ema_cpu
+            checkpoint["ema_decay"] = self._ema_decay()
+
+    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        # 기존 코드 유지
+        self.ckpt_loaded_epoch = checkpoint["epoch"]
+        # EMA 복구
+        if "ema_state_dict" in checkpoint:
+            self._ema_state_dict = {}
+            for k, v in checkpoint["ema_state_dict"].items():
+                self._ema_state_dict[k] = v  # 텐서는 나중에 swap시 디바이스/dtype 맞춰짐
+            if "ema_decay" in checkpoint:
+                self.ema_decay = float(checkpoint["ema_decay"])
+
+
     def on_before_optimizer_step(self, optimizer):
         self.log_dict({f"grad_norm/{k}": v for k, v in grad_norm(self, norm_type=2).items()})
+
+    def sample_with_ema(self, *args, **kwargs):
+        with self._swap_to_ema_weights():
+            return self.synthesise(*args, **kwargs)
