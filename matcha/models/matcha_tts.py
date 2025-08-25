@@ -238,11 +238,6 @@ class MatchaTTS(BaseLightningClass):  # 🍵
         mu_y = mu_y.transpose(1, 2)
 
         # Compute loss of the decoder : CFM 파트
-        print('y shape : ', y.shape)
-        print('y_mask shape : ', y_mask.shape)
-        print('mu_y shape : ', mu_y.shape)
-        print('spks shape : ', spks.shape)
-        print('cond shape : ', cond.shape)
         diff_loss, _ = self.decoder.compute_loss(x1=y, mask=y_mask, mu=mu_y, spks=spks, cond=cond)
 
         if self.prior_loss:

@@ -7,6 +7,7 @@ pip install huggingface_hub vocos datasets
 pip install -e .
 pip install -U numpy
 pip install transformers
+pip install -e .
 
 git config --global user.email zxcv05999@naver.com
 git config --global user.name thxxx

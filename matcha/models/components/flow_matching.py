@@ -88,14 +88,14 @@ class BASECFM(torch.nn.Module, ABC):
 
         return sol[-1]
 
-    def get_timestep(self, batch_size):
+    def get_timestep(self, batch_size, dtype, device):
         if random.random()<0.25:
-            t = torch.rand((batch_size, ), dtype=self.dtype, device=self.device)
+            t = torch.rand((batch_size, ), dtype=dtype, device=device)
         else:
             tnorm = np.random.normal(loc=0, scale=1.0, size=batch_size)
             t = 1 / (1 + np.exp(-tnorm))
-            t = torch.tensor(t, dtype=self.dtype, device=self.device)
-        # t = torch.rand([batch_size, 1, 1], device=self.device, dtype=self.dtype)
+            t = torch.tensor(t, dtype=dtype, device=device)
+        
         return t
 
     def compute_loss(self, x1, mask, mu, spks=None, cond=None):
@@ -137,7 +137,7 @@ class BASECFM(torch.nn.Module, ABC):
 
         # --- 2) timestep만 K배 샘플링 ---
         # get_timestep(K_batch): [K_batch] 또는 [K_batch, 1, ...] 형태여야 함
-        t = self.get_timestep(K_batch)  # 0~1 uniform
+        t = self.get_timestep(K_batch, dtype=x1.dtype, device=x1.device)  # 0~1 uniform
 
         # x1_rep과 브로드캐스트 되도록 view로 맞춰줍니다.
         # (예: x1_rep: [K_batch, C, T]라면 t -> [K_batch, 1, 1])

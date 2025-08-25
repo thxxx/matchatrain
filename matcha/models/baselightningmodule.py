@@ -182,6 +182,8 @@ class BaseLightningClass(LightningModule, ABC):
         """
         import pandas as pd
         import torchaudio
+        from matcha.text import sequence_to_text, text_to_sequence
+        from matcha.utils.utils import intersperse
 
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
@@ -190,7 +192,7 @@ class BaseLightningClass(LightningModule, ABC):
 
         wmodel = AutoModelForSpeechSeq2Seq.from_pretrained(
             model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True, use_safetensors=True
-        )
+        ).eval()
         wmodel.to(device)
         processor = AutoProcessor.from_pretrained(model_id)
 
@@ -208,6 +210,38 @@ class BaseLightningClass(LightningModule, ABC):
             audio = vocoder(mel).clamp(-1, 1)
             audio = denoiser(audio.squeeze(0), strength=0.00025).cpu().squeeze()
             return audio.cpu().squeeze()
+        
+        n_timesteps = 10
+        length_scale=1.0
+        temperature = 0.667
+
+        @torch.inference_mode()
+        def process_text(text: str):
+            x = torch.tensor(intersperse(text_to_sequence(text, ['english_cleaners2'])[0], 0),dtype=torch.long, device=device)[None]
+            x_lengths = torch.tensor([x.shape[-1]],dtype=torch.long, device=device)
+            x_phones = sequence_to_text(x.squeeze(0).tolist())
+            return {
+                'x_orig': text, # Hi how are you today?
+                'x': x,         # ids of phoneme embedding
+                'x_lengths': x_lengths,
+                'x_phones': x_phones # _h_ˈ_a_ɪ_ _h_ˌ_a_ʊ_ _ɑ_ː_ɹ_ _j_u_ː_ _t_ə_d_ˈ_e_ɪ_?_
+            }
+        
+        @torch.inference_mode()
+        def synthesise(text, spks=None):
+            text_processed = process_text(text)
+            
+            output = self.synthesise(
+                text_processed['x'], 
+                text_processed['x_lengths'],
+                n_timesteps=n_timesteps,
+                temperature=temperature,
+                spks=spks,
+                length_scale=length_scale
+            )
+            # merge everything to one dict    
+            output.update({**text_processed})
+            return output
 
         eval_df = pd.read_csv("/workspace/matchatrain/LJSpeech-1.1/test.csv", sep="|", header=None)
         texts =  [eval_df.iloc[i][1] for i in range(len(eval_df))]
@@ -216,18 +250,33 @@ class BaseLightningClass(LightningModule, ABC):
         wer_list, cer_list = [], []
 
         for text in texts:
-            output = self.synthesise(text, n_timesteps=10, spks=None)
-            waveform = to_waveform(output['mel'], vocoder)
-            mono_22k = resampler(waveform)
-            script = pipe(mono_22k)
+            with torch.no_grad():
+                output = synthesise(text, spks=None)
+                waveform = to_waveform(output['mel'], vocoder)
+                mono_22k = resampler(waveform)
+                script = pipe(mono_22k)
 
             _w = wer_en(text, script['text'])
             _c = cer_en(text, script['text'])
             wer_list.append(_w)
             cer_list.append(_c)
 
-        self.log("metric/WER", sum(wer_list)/len(wer_list), prog_bar=True, on_epoch=True, logger=True, sync_dist=True)
-        self.log("metric/CER", sum(cer_list)/len(cer_list), prog_bar=True, on_epoch=True, logger=True, sync_dist=True)
+        # self.log("metric/WER", sum(wer_list)/len(wer_list), prog_bar=True, on_epoch=True, logger=True, sync_dist=True)
+        # self.log("metric/CER", sum(cer_list)/len(cer_list), prog_bar=True, on_epoch=True, logger=True, sync_dist=True)
+
+        wer = sum(wer_list)/len(wer_list)
+        cer = sum(cer_list)/len(cer_list)
+
+        step = self.current_epoch
+        if hasattr(self.logger, "experiment"):
+            exp = self.logger.experiment
+            # TensorBoard 예시
+            if hasattr(exp, "add_scalar"):
+                exp.add_scalar("metric/WER", wer, step)
+                exp.add_scalar("metric/CER", cer, step)
+            # WandB 예시
+            elif hasattr(exp, "log"):
+                exp.log({"metric/WER": wer, "metric/CER": cer, "epoch": step})
 
         del wmodel, processor, pipe, resampler, eval_df, texts, wer_list, cer_list
         torch.cuda.empty_cache()
@@ -275,7 +324,8 @@ class BaseLightningClass(LightningModule, ABC):
                 
                 spks = one_batch["spks"][i].unsqueeze(0).to(self.device) if one_batch["spks"] is not None else None
                 
-                output = self.synthesise(x[:, :x_lengths], x_lengths, n_timesteps=10, spks=spks)
+                with torch.no_grad():
+                    output = self.synthesise(x[:, :x_lengths], x_lengths, n_timesteps=10, spks=spks)
                 
                 y_enc, y_dec = output["encoder_outputs"], output["decoder_outputs"]
 
